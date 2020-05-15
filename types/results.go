@@ -16,6 +16,7 @@ type ABCIResult struct {
 	Data      bytes.HexBytes `json:"data"`
 	GasWanted int64          `json:"gas_wanted"`
 	GasUsed   int64          `json:"gas_used"`
+	Events    []abci.Event   `json:"events"`
 }
 
 // Bytes returns the amino encoded ABCIResult
@@ -42,6 +43,7 @@ func NewResultFromResponse(response *abci.ResponseDeliverTx) ABCIResult {
 		Data:      response.Data,
 		GasWanted: response.GasWanted,
 		GasUsed:   response.GasUsed,
+		Events:    response.Events,
 	}
 }
 

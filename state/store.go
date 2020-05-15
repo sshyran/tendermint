@@ -6,6 +6,7 @@ import (
 	dbm "github.com/tendermint/tm-db"
 
 	abci "github.com/tendermint/tendermint/abci/types"
+	"github.com/tendermint/tendermint/crypto/merkle"
 	tmmath "github.com/tendermint/tendermint/libs/math"
 	tmos "github.com/tendermint/tendermint/libs/os"
 	"github.com/tendermint/tendermint/types"
@@ -252,8 +253,23 @@ func (arz *ABCIResponses) Bytes() []byte {
 }
 
 func (arz *ABCIResponses) ResultsHash() []byte {
+	// Amino-encode BeginBlock events.
+	bbeBytes, err := cdc.MarshalBinaryLengthPrefixed(arz.BeginBlock.Events)
+	if err != nil {
+		panic(err)
+	}
+
+	// Build a Merkle tree of amino-encoded DeliverTx results and get a hash.
 	results := types.NewResults(arz.DeliverTxs)
-	return results.Hash()
+
+	// Amino-encode EndBlock events.
+	ebeBytes, err := cdc.MarshalBinaryLengthPrefixed(arz.EndBlock.Events)
+	if err != nil {
+		panic(err)
+	}
+
+	// Build a Merkle tree out of the above 3 binary slices.
+	return merkle.SimpleHashFromByteSlices([][]byte{bbeBytes, results.Hash(), ebeBytes})
 }
 
 // LoadABCIResponses loads the ABCIResponses for the given height from the database.

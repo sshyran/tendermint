@@ -12,8 +12,10 @@ import (
 // TODO: add tags and other fields
 // https://github.com/tendermint/tendermint/issues/1007
 type ABCIResult struct {
-	Code uint32         `json:"code"`
-	Data bytes.HexBytes `json:"data"`
+	Code      uint32         `json:"code"`
+	Data      bytes.HexBytes `json:"data"`
+	GasWanted int64          `json:"gas_wanted"`
+	GasUsed   int64          `json:"gas_used"`
 }
 
 // Bytes returns the amino encoded ABCIResult
@@ -36,8 +38,10 @@ func NewResults(responses []*abci.ResponseDeliverTx) ABCIResults {
 // NewResultFromResponse creates ABCIResult from ResponseDeliverTx.
 func NewResultFromResponse(response *abci.ResponseDeliverTx) ABCIResult {
 	return ABCIResult{
-		Code: response.Code,
-		Data: response.Data,
+		Code:      response.Code,
+		Data:      response.Data,
+		GasWanted: response.GasWanted,
+		GasUsed:   response.GasUsed,
 	}
 }
 

@@ -7,11 +7,18 @@ import (
 	"io/ioutil"
 	"time"
 
+	"github.com/gogo/protobuf/jsonpb"
+	"github.com/gogo/protobuf/proto"
+
 	"github.com/tendermint/tendermint/crypto"
 	"github.com/tendermint/tendermint/crypto/ed25519"
+	cryptoenc "github.com/tendermint/tendermint/crypto/encoding"
 	tmbytes "github.com/tendermint/tendermint/libs/bytes"
+	"github.com/tendermint/tendermint/libs/encode"
+	tmmath "github.com/tendermint/tendermint/libs/math"
 	tmos "github.com/tendermint/tendermint/libs/os"
 	"github.com/tendermint/tendermint/libs/tempfile"
+	privvalproto "github.com/tendermint/tendermint/proto/privval"
 	tmproto "github.com/tendermint/tendermint/proto/types"
 	"github.com/tendermint/tendermint/types"
 	tmtime "github.com/tendermint/tendermint/types/time"
@@ -26,14 +33,14 @@ const (
 )
 
 // A vote is either stepPrevote or stepPrecommit.
-func voteToStep(vote *types.Vote) int8 {
+func voteToStep(vote *tmproto.Vote) int8 {
 	switch vote.Type {
 	case tmproto.PrevoteType:
 		return stepPrevote
 	case tmproto.PrecommitType:
 		return stepPrecommit
 	default:
-		panic(fmt.Sprintf("Unknown vote type: %v", vote.Type))
+		panic(fmt.Sprintf("Unknown vote type: %T", vote.Type))
 	}
 }
 
@@ -55,7 +62,12 @@ func (pvKey FilePVKey) Save() {
 		panic("cannot save PrivValidator key: filePath not set")
 	}
 
-	jsonBytes, err := cdc.MarshalJSONIndent(pvKey, "", "  ")
+	pvk, err := pvKey.ToProto()
+	if err != nil {
+		panic(fmt.Errorf("unable to create proto type: %w", err))
+	}
+
+	jsonBytes, err := encode.MarshalJSONIndent(pvk)
 	if err != nil {
 		panic(err)
 	}
@@ -64,6 +76,55 @@ func (pvKey FilePVKey) Save() {
 		panic(err)
 	}
 
+}
+
+// ToProto transistions FilePVKey to the protobuf representation
+func (pvKey *FilePVKey) ToProto() (*privvalproto.FilePVKey, error) {
+	if pvKey == nil {
+		return nil, errors.New("nil FilePVKey")
+	}
+
+	pb := new(privvalproto.FilePVKey)
+	pb.Address = pvKey.Address
+	pb.FilePath = pvKey.filePath
+
+	pubKey, err := cryptoenc.PubKeyToProto(pvKey.PubKey)
+	if err != nil {
+		return nil, err
+	}
+	pb.PubKey = pubKey
+
+	privKey, err := cryptoenc.PrivKeyToProto(pvKey.PrivKey)
+	if err != nil {
+		return nil, err
+	}
+	pb.PrivKey = privKey
+
+	return pb, nil
+}
+
+func FilePVKeyFromProto(pb *privvalproto.FilePVKey) (FilePVKey, error) {
+	if pb == nil {
+		return FilePVKey{}, errors.New("nil FilePVKey")
+	}
+
+	pv := new(FilePVKey)
+	pv.Address = tmbytes.HexBytes(pb.Address)
+	pv.filePath = pb.FilePath
+
+	pubKey, err := cryptoenc.PubKeyFromProto(pb.PubKey)
+	if err != nil {
+		return FilePVKey{}, err
+	}
+	pv.PubKey = pubKey
+
+	privKey, err := cryptoenc.PrivKeyFromProto(pb.PrivKey)
+	if err != nil {
+		return FilePVKey{}, err
+	}
+	pv.PrivKey = privKey
+
+	return *pv, nil
 }
 
 //-------------------------------------------------------------------------------
@@ -126,7 +187,13 @@ func (lss *FilePVLastSignState) Save() {
 	if outFile == "" {
 		panic("cannot save FilePVLastSignState: filePath not set")
 	}
-	jsonBytes, err := cdc.MarshalJSONIndent(lss, "", "  ")
+
+	pb, err := lss.ToProto()
+	if err != nil {
+		panic(fmt.Errorf("unable to create proto type: %w", err))
+	}
+
+	jsonBytes, err := encode.MarshalJSONIndent(pb)
 	if err != nil {
 		panic(err)
 	}
@@ -134,6 +201,44 @@ func (lss *FilePVLastSignState) Save() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+func (lss *FilePVLastSignState) ToProto() (*privvalproto.FilePVLastSignState, error) {
+	if lss == nil {
+		return nil, errors.New("nil FilePVLastSignState")
+	}
+
+	pb := new(privvalproto.FilePVLastSignState)
+
+	pb.Height = lss.Height
+	pb.Round = lss.Round
+	pb.Step = int32(lss.Step)
+	pb.Signature = lss.Signature
+	pb.SignBytes = lss.SignBytes
+	pb.FilePath = lss.filePath
+
+	return pb, nil
+}
+
+func FilePVLastSignStateFromProto(pb *privvalproto.FilePVLastSignState) (*FilePVLastSignState, error) {
+	if pb == nil {
+		return nil, errors.New("nil FilePVLastSignState")
+	}
+
+	pvl := new(FilePVLastSignState)
+
+	pvl.Height = pb.Height
+	pvl.Round = pb.Round
+	i8, err := tmmath.SafeConvertInt8(int64(pb.Step))
+	if err != nil {
+		return nil, fmt.Errorf("deny conversion due to possible int8 overflow: %w", err)
+	}
+	pvl.Step = i8
+	pvl.Signature = pb.Signature
+	pvl.SignBytes = pb.SignBytes
+	pvl.filePath = pb.FilePath
+
+	return pvl, nil
 }
 
 //-------------------------------------------------------------------------------
@@ -186,10 +291,14 @@ func loadFilePV(keyFilePath, stateFilePath string, loadState bool) *FilePV {
 	if err != nil {
 		tmos.Exit(err.Error())
 	}
-	pvKey := FilePVKey{}
-	err = cdc.UnmarshalJSON(keyJSONBytes, &pvKey)
-	if err != nil {
+	pvK := privvalproto.FilePVKey{}
+	if err := jsonpb.Unmarshal(bytes.NewReader(keyJSONBytes), &pvK); err != nil {
 		tmos.Exit(fmt.Sprintf("Error reading PrivValidator key from %v: %v\n", keyFilePath, err))
+	}
+
+	pvKey, err := FilePVKeyFromProto(&pvK)
+	if err != nil {
+		tmos.Exit(err.Error())
 	}
 
 	// overwrite pubkey and address for convenience
@@ -197,23 +306,28 @@ func loadFilePV(keyFilePath, stateFilePath string, loadState bool) *FilePV {
 	pvKey.Address = pvKey.PubKey.Address()
 	pvKey.filePath = keyFilePath
 
-	pvState := FilePVLastSignState{}
+	pvS := privvalproto.FilePVLastSignState{}
+
 	if loadState {
 		stateJSONBytes, err := ioutil.ReadFile(stateFilePath)
 		if err != nil {
 			tmos.Exit(err.Error())
 		}
-		err = cdc.UnmarshalJSON(stateJSONBytes, &pvState)
-		if err != nil {
+		if err := jsonpb.Unmarshal(bytes.NewReader(stateJSONBytes), &pvS); err != nil {
 			tmos.Exit(fmt.Sprintf("Error reading PrivValidator state from %v: %v\n", stateFilePath, err))
 		}
+	}
+
+	pvState, err := FilePVLastSignStateFromProto(&pvS)
+	if err != nil {
+		tmos.Exit(fmt.Sprintf("Error transistioning PrivValidator from proto from : %v\n", err))
 	}
 
 	pvState.filePath = stateFilePath
 
 	return &FilePV{
 		Key:           pvKey,
-		LastSignState: pvState,
+		LastSignState: *pvState,
 	}
 }
 
@@ -244,7 +358,7 @@ func (pv *FilePV) GetPubKey() (crypto.PubKey, error) {
 
 // SignVote signs a canonical representation of the vote, along with the
 // chainID. Implements PrivValidator.
-func (pv *FilePV) SignVote(chainID string, vote *types.Vote) error {
+func (pv *FilePV) SignVote(chainID string, vote *tmproto.Vote) error {
 	if err := pv.signVote(chainID, vote); err != nil {
 		return fmt.Errorf("error signing vote: %v", err)
 	}
@@ -253,7 +367,7 @@ func (pv *FilePV) SignVote(chainID string, vote *types.Vote) error {
 
 // SignProposal signs a canonical representation of the proposal, along with
 // the chainID. Implements PrivValidator.
-func (pv *FilePV) SignProposal(chainID string, proposal *types.Proposal) error {
+func (pv *FilePV) SignProposal(chainID string, proposal *tmproto.Proposal) error {
 	if err := pv.signProposal(chainID, proposal); err != nil {
 		return fmt.Errorf("error signing proposal: %v", err)
 	}
@@ -294,7 +408,7 @@ func (pv *FilePV) String() string {
 // signVote checks if the vote is good to sign and sets the vote signature.
 // It may need to set the timestamp as well if the vote is otherwise the same as
 // a previously signed vote (ie. we crashed after signing but before the vote hit the WAL).
-func (pv *FilePV) signVote(chainID string, vote *types.Vote) error {
+func (pv *FilePV) signVote(chainID string, vote *tmproto.Vote) error {
 	height, round, step := vote.Height, vote.Round, voteToStep(vote)
 
 	lss := pv.LastSignState
@@ -304,7 +418,7 @@ func (pv *FilePV) signVote(chainID string, vote *types.Vote) error {
 		return err
 	}
 
-	signBytes := vote.SignBytes(chainID)
+	signBytes := types.VoteSignBytes(chainID, vote)
 
 	// We might crash before writing to the wal,
 	// causing us to try to re-sign for the same HRS.
@@ -336,7 +450,7 @@ func (pv *FilePV) signVote(chainID string, vote *types.Vote) error {
 // signProposal checks if the proposal is good to sign and sets the proposal signature.
 // It may need to set the timestamp as well if the proposal is otherwise the same as
 // a previously signed proposal ie. we crashed after signing but before the proposal hit the WAL).
-func (pv *FilePV) signProposal(chainID string, proposal *types.Proposal) error {
+func (pv *FilePV) signProposal(chainID string, proposal *tmproto.Proposal) error {
 	height, round, step := proposal.Height, proposal.Round, stepPropose
 
 	lss := pv.LastSignState
@@ -346,7 +460,7 @@ func (pv *FilePV) signProposal(chainID string, proposal *types.Proposal) error {
 		return err
 	}
 
-	signBytes := proposal.SignBytes(chainID)
+	signBytes := types.ProposalSignBytes(chainID, proposal)
 
 	// We might crash before writing to the wal,
 	// causing us to try to re-sign for the same HRS.
@@ -392,11 +506,11 @@ func (pv *FilePV) saveSigned(height int64, round int32, step int8,
 // returns the timestamp from the lastSignBytes.
 // returns true if the only difference in the votes is their timestamp.
 func checkVotesOnlyDifferByTimestamp(lastSignBytes, newSignBytes []byte) (time.Time, bool) {
-	var lastVote, newVote types.CanonicalVote
-	if err := cdc.UnmarshalBinaryLengthPrefixed(lastSignBytes, &lastVote); err != nil {
+	var lastVote, newVote tmproto.CanonicalVote
+	if err := proto.Unmarshal(lastSignBytes, &lastVote); err != nil {
 		panic(fmt.Sprintf("LastSignBytes cannot be unmarshalled into vote: %v", err))
 	}
-	if err := cdc.UnmarshalBinaryLengthPrefixed(newSignBytes, &newVote); err != nil {
+	if err := proto.Unmarshal(newSignBytes, &newVote); err != nil {
 		panic(fmt.Sprintf("signBytes cannot be unmarshalled into vote: %v", err))
 	}
 
@@ -406,8 +520,8 @@ func checkVotesOnlyDifferByTimestamp(lastSignBytes, newSignBytes []byte) (time.T
 	now := tmtime.Now()
 	lastVote.Timestamp = now
 	newVote.Timestamp = now
-	lastVoteBytes, _ := cdc.MarshalJSON(lastVote)
-	newVoteBytes, _ := cdc.MarshalJSON(newVote)
+	lastVoteBytes, _ := encode.MarshalJSON(&lastVote)
+	newVoteBytes, _ := encode.MarshalJSON(&newVote)
 
 	return lastTime, bytes.Equal(newVoteBytes, lastVoteBytes)
 }
@@ -415,11 +529,11 @@ func checkVotesOnlyDifferByTimestamp(lastSignBytes, newSignBytes []byte) (time.T
 // returns the timestamp from the lastSignBytes.
 // returns true if the only difference in the proposals is their timestamp
 func checkProposalsOnlyDifferByTimestamp(lastSignBytes, newSignBytes []byte) (time.Time, bool) {
-	var lastProposal, newProposal types.CanonicalProposal
-	if err := cdc.UnmarshalBinaryLengthPrefixed(lastSignBytes, &lastProposal); err != nil {
+	var lastProposal, newProposal tmproto.CanonicalProposal
+	if err := proto.Unmarshal(lastSignBytes, &lastProposal); err != nil {
 		panic(fmt.Sprintf("LastSignBytes cannot be unmarshalled into proposal: %v", err))
 	}
-	if err := cdc.UnmarshalBinaryLengthPrefixed(newSignBytes, &newProposal); err != nil {
+	if err := proto.Unmarshal(newSignBytes, &newProposal); err != nil {
 		panic(fmt.Sprintf("signBytes cannot be unmarshalled into proposal: %v", err))
 	}
 
@@ -428,8 +542,8 @@ func checkProposalsOnlyDifferByTimestamp(lastSignBytes, newSignBytes []byte) (ti
 	now := tmtime.Now()
 	lastProposal.Timestamp = now
 	newProposal.Timestamp = now
-	lastProposalBytes, _ := cdc.MarshalBinaryLengthPrefixed(lastProposal)
-	newProposalBytes, _ := cdc.MarshalBinaryLengthPrefixed(newProposal)
+	lastProposalBytes, _ := proto.Marshal(&lastProposal)
+	newProposalBytes, _ := proto.Marshal(&newProposal)
 
 	return lastTime, bytes.Equal(newProposalBytes, lastProposalBytes)
 }

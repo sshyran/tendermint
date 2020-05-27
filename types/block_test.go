@@ -378,9 +378,9 @@ func TestBlockMaxDataBytes(t *testing.T) {
 	}{
 		0: {-10, 1, 0, true, 0},
 		1: {10, 1, 0, true, 0},
-		2: {849, 1, 0, true, 0},
-		3: {850, 1, 0, false, 0},
-		4: {851, 1, 0, false, 1},
+		2: {846, 1, 0, true, 0},
+		3: {848, 1, 0, false, 0},
+		4: {849, 1, 0, false, 1},
 	}
 
 	for i, tc := range testCases {
@@ -409,9 +409,9 @@ func TestBlockMaxDataBytesUnknownEvidence(t *testing.T) {
 		0: {-10, 0, 1, true, 0},
 		1: {10, 0, 1, true, 0},
 		2: {841, 0, 1, true, 0},
-		3: {850, 0, 1, false, 0},
-		4: {1286, 1, 1, false, 0},
-		5: {1287, 1, 1, false, 1},
+		3: {848, 0, 1, false, 0},
+		4: {1284, 1, 1, false, 0},
+		5: {1285, 1, 1, false, 1},
 	}
 
 	for i, tc := range testCases {
